@@ -17,6 +17,7 @@ const state = {
   calendars: [],
   memberships: [],        // mine (or everyone's if owner)
   events: [],
+  busy: [],               // busy blocks for events I can't see in full
   viewYear: today.getFullYear(),
   viewMonth: today.getMonth(),
   selected: dkey(today),
@@ -100,13 +101,16 @@ function gridRange() {
 
 async function loadEvents() {
   const [start, end] = gridRange()
-  const { data } = await supabase
-    .from('events')
-    .select('*')
-    .lte('starts_at', end.toISOString())
-    .gte('ends_at', start.toISOString())
-    .order('starts_at')
-  state.events = data || []
+  const [evRes, busyRes] = await Promise.all([
+    supabase.from('events').select('*')
+      .lte('starts_at', end.toISOString())
+      .gte('ends_at', start.toISOString())
+      .order('starts_at'),
+    supabase.rpc('get_busy', { from_ts: start.toISOString(), to_ts: end.toISOString() }),
+  ])
+  state.events = evRes.data || []
+  const visible = new Set(state.events.map((e) => e.id))
+  state.busy = (busyRes.data || []).filter((b) => !visible.has(b.event_id))
 }
 
 function subscribeRealtime() {
@@ -122,7 +126,14 @@ function subscribeRealtime() {
     .on('postgres_changes', { event: '*', schema: 'public', table: 'calendars' }, refresh)
     .on('postgres_changes', { event: '*', schema: 'public', table: 'memberships' }, refresh)
     .on('postgres_changes', { event: '*', schema: 'public', table: 'profiles' }, refresh)
+    // postgres_changes respects row security, so people who only see an event as
+    // a busy block never get notified of it — a broadcast poke covers them.
+    .on('broadcast', { event: 'poke' }, refresh)
     .subscribe()
+}
+
+function pokePeers() {
+  state.channel?.send({ type: 'broadcast', event: 'poke', payload: {} })
 }
 
 /* ---------------- event helpers ---------------- */
@@ -140,10 +151,18 @@ function eventDays(ev) {
   return days
 }
 
-function eventsOn(key) {
-  const list = state.events.filter((ev) => !state.hidden.has(ev.calendar_id) && eventDays(ev).includes(key))
-  return list.sort((a, b) => (b.all_day - a.all_day) || (new Date(a.starts_at) - new Date(b.starts_at)))
+function itemsOn(key) {
+  // full events + busy blocks, all-day first then by start time
+  const evs = state.events
+    .filter((ev) => !state.hidden.has(ev.calendar_id) && eventDays(ev).includes(key))
+    .map((ev) => ({ kind: 'event', sort: ev.all_day ? -1 : new Date(ev.starts_at).getTime(), ev }))
+  const busy = state.busy
+    .filter((b) => eventDays(b).includes(key))
+    .map((b) => ({ kind: 'busy', sort: b.all_day ? -1 : new Date(b.starts_at).getTime(), b }))
+  return [...evs, ...busy].sort((a, z) => a.sort - z.sort)
 }
+
+function firstName(p) { return (p?.name || p?.email || '?').trim().split(/\s+/)[0] }
 
 /* ---------------- auth screen ---------------- */
 
@@ -194,11 +213,20 @@ function renderMain() {
     const inMonth = d.getMonth() === state.viewMonth
     const isToday = key === dkey(new Date())
     const isSel = key === state.selected
-    const colors = [...new Set(eventsOn(key).map((ev) => calById(ev.calendar_id)?.color || '#999'))].slice(0, 4)
+    const items = itemsOn(key)
+    const shown = items.slice(0, 3)
+    const extra = items.length - shown.length
+    const pills = shown.map((it) => {
+      if (it.kind === 'busy') {
+        const p = profById(it.b.attendee_id)
+        return `<i class="pill busy" style="background:${p?.color || '#64748b'}">${esc(firstName(p))} busy</i>`
+      }
+      return `<i class="pill" style="background:${calById(it.ev.calendar_id)?.color || '#64748b'}">${esc(it.ev.title)}</i>`
+    }).join('')
     cells += `
       <button class="day ${inMonth ? '' : 'dim'} ${isToday ? 'today' : ''} ${isSel ? 'sel' : ''}" data-day="${key}">
         <span class="num">${d.getDate()}</span>
-        <span class="dots">${colors.map((c) => `<i style="background:${c}"></i>`).join('')}</span>
+        <span class="pills">${pills}${extra > 0 ? `<i class="more">+${extra}</i>` : ''}</span>
       </button>`
     d.setDate(d.getDate() + 1)
   }
@@ -208,14 +236,29 @@ function renderMain() {
       <span class="dot" style="background:${c.color}"></span>${esc(c.name)}
     </button>`).join('')
 
-  const dayEvents = eventsOn(state.selected)
-  const agenda = dayEvents.length
-    ? dayEvents.map((ev) => {
+  const dayItems = itemsOn(state.selected)
+  const agenda = dayItems.length
+    ? dayItems.map((it) => {
+        if (it.kind === 'busy') {
+          const p = profById(it.b.attendee_id)
+          const when = it.b.all_day ? '<b>all day</b>' : `<b>${fmtTime(new Date(it.b.starts_at))}</b>${fmtTime(new Date(it.b.ends_at))}`
+          return `
+            <div class="evt busyrow">
+              <span class="bar" style="background:${p?.color || '#64748b'}"></span>
+              <span class="when">${when}</span>
+              <span class="body">
+                <span class="t">${esc(p?.name || 'Someone')} · Busy</span>
+                <span class="m">details on another calendar</span>
+              </span>
+            </div>`
+        }
+        const ev = it.ev
         const cal = calById(ev.calendar_id)
-        const s = new Date(ev.starts_at)
         const who = profById(ev.created_by)
-        const when = ev.all_day ? '<b>all day</b>' : `<b>${fmtTime(s)}</b>${fmtTime(new Date(ev.ends_at))}`
-        const meta = [cal?.name, ev.location, who ? `added by ${who.name || who.email}` : null].filter(Boolean).join(' · ')
+        const attendees = (ev.attendee_ids || []).map((id) => firstName(profById(id))).filter(Boolean).join(', ')
+        const when = ev.all_day ? '<b>all day</b>' : `<b>${fmtTime(new Date(ev.starts_at))}</b>${fmtTime(new Date(ev.ends_at))}`
+        const meta = [cal?.name, ev.location, attendees ? `with ${attendees}` : null, who ? `added by ${firstName(who)}` : null]
+          .filter(Boolean).join(' · ')
         return `
           <button class="evt" data-evt="${ev.id}">
             <span class="bar" style="background:${cal?.color || '#999'}"></span>
@@ -345,6 +388,14 @@ function openEventSheet(ev) {
       <input id="evLoc" maxlength="200" value="${editing ? esc(ev.location) : ''}" ${editable ? '' : 'disabled'} placeholder="Address or place">
       <label>Notes</label>
       <textarea id="evNotes" rows="2" maxlength="2000" ${editable ? '' : 'disabled'}>${editing ? esc(ev.notes) : ''}</textarea>
+      <label>Who's involved (shows them as busy on other calendars)</label>
+      <div class="attendees">
+        ${state.profiles.map((p) => `
+          <label class="att">
+            <input type="checkbox" data-att="${p.id}" ${editing && (ev.attendee_ids || []).includes(p.id) ? 'checked' : ''} ${editable ? '' : 'disabled'}>
+            <span class="avatar" style="background:${p.color}">${initials(p)}</span>${esc(firstName(p))}
+          </label>`).join('')}
+      </div>
       ${who ? `<div class="meta-line">Added by ${esc(who.name || who.email)}</div>` : ''}
       <div class="form-error" id="evErr"></div>
       ${editable ? '<button class="btn" type="submit">Save</button>' : ''}
@@ -390,6 +441,7 @@ function openEventSheet(ev) {
       all_day: allDayEl.checked,
       starts_at: startsAt.toISOString(),
       ends_at: endsAt.toISOString(),
+      attendee_ids: [...ov.querySelectorAll('[data-att]:checked')].map((x) => x.dataset.att),
     }
     const q = editing
       ? supabase.from('events').update(row).eq('id', ev.id)
@@ -402,6 +454,7 @@ function openEventSheet(ev) {
     state.viewYear = nd.getFullYear(); state.viewMonth = nd.getMonth()
     await loadEvents()
     renderMain()
+    pokePeers()
     toast(editing ? 'Event updated' : 'Event added')
   }
 
@@ -413,6 +466,7 @@ function openEventSheet(ev) {
     closeSheet()
     await loadEvents()
     renderMain()
+    pokePeers()
     toast('Event deleted')
   }
 }
@@ -483,7 +537,7 @@ function openSettings() {
     ov.querySelector('#meErr').textContent = error ? error.message : ''
     if (!error) { ov.querySelector('#myPw').value = ''; toast('Password changed') }
   }
-  ov.querySelector('#signOut').onclick = async () => { await supabase.auth.signOut() }
+  ov.querySelector('#signOut').onclick = async () => { closeSheet(); await supabase.auth.signOut() }
 
   if (isOwner()) {
     ov.querySelectorAll('[data-editcal]').forEach((b) => (b.onclick = () => openCalendarSheet(calById(b.dataset.editcal))))
@@ -637,6 +691,7 @@ async function start() {
     }
     if (event === 'SIGNED_OUT') {
       if (state.channel) supabase.removeChannel(state.channel)
+      closeSheet()
       renderAuth()
     }
   })

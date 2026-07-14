@@ -102,12 +102,12 @@ label { display: block; font-size: 13px; font-weight: 600; color: var(--text-sof
 .dow { display: grid; grid-template-columns: repeat(7, 1fr); text-align: center; font-size: 11px; font-weight: 700; color: var(--text-soft); padding-bottom: 6px; }
 .grid { display: grid; grid-template-columns: repeat(7, 1fr); }
 .day {
-  aspect-ratio: 1 / 1.05; display: flex; flex-direction: column; align-items: center;
-  padding-top: 5px; border-radius: 10px; position: relative; min-width: 0;
+  min-height: 84px; display: flex; flex-direction: column; align-items: center;
+  padding: 4px 2px 3px; border-radius: 10px; position: relative; min-width: 0;
 }
 @media (min-width: 640px) {
   #app { max-width: 960px; margin: 0 auto; }
-  .day { aspect-ratio: auto; height: 88px; }
+  .day { min-height: 104px; }
 }
 .day .num {
   width: 28px; height: 28px; border-radius: 50%; font-size: 14px;
@@ -117,8 +117,27 @@ label { display: block; font-size: 13px; font-weight: 600; color: var(--text-sof
 .day.today .num { border: 1.5px solid var(--accent); color: var(--accent); font-weight: 700; }
 .day.sel { background: var(--surface-2); }
 .day.sel .num { background: var(--accent); color: #fff; border: none; font-weight: 700; }
-.day .dots { display: flex; gap: 3px; margin-top: 3px; height: 6px; }
-.day .dots i { width: 6px; height: 6px; border-radius: 50%; display: block; }
+.day .num { width: 24px; height: 24px; font-size: 13px; }
+.day .pills { display: flex; flex-direction: column; gap: 2px; width: 100%; margin-top: 2px; overflow: hidden; }
+.pill {
+  display: block; font-size: 9.5px; font-weight: 650; font-style: normal; color: #fff;
+  border-radius: 4px; padding: 1.5px 3px; text-align: left;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.pill.busy { opacity: .75; }
+.more { font-size: 9.5px; font-style: normal; color: var(--text-soft); text-align: left; padding-left: 3px; }
+.evt.busyrow { opacity: .8; }
+
+/* attendee picker */
+.attendees { display: flex; flex-wrap: wrap; gap: 8px; }
+.att {
+  display: flex; align-items: center; gap: 7px; margin: 0;
+  background: var(--surface-2); border: 1px solid var(--line); border-radius: 999px;
+  padding: 5px 14px 5px 6px; font-size: 14px; font-weight: 500; color: var(--text); cursor: pointer;
+}
+.att input { width: auto; accent-color: var(--accent); margin-left: 4px; }
+.att .avatar { width: 24px; height: 24px; font-size: 12px; }
+.att:has(input:checked) { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, var(--surface-2)); }
 
 /* ---------- day agenda ---------- */
 .agenda { padding: 16px 16px 110px; }
